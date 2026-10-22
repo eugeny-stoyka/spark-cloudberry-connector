@@ -436,48 +436,51 @@ amount numeric(12,2), note text` (a note of ~70 characters), 12 monthly leaf par
 
 **The run** (`docker/run.sh stress run`, 2026-10-22): an untimed warm-up first, then every scenario once. The
 time is of the transfer only; the result is checked after it — the count and the sums of every column of the
-Parquet, the rows of the table. The speed is the text size (4.5 GB) / the time.
+Parquet, the rows of the table. The speed is the text size of the table (4.5 GB) / the time.
 
-| What happens | Tasks ¹ | `default`: 4 segments / 4 slots | `large`: 8 / 8 | large / default |
-|---|---|---|---|---|
-| **Export: Spark reads `its_stress` from Cloudberry and writes it into HDFS as Parquet** | | | | |
-| one transfer of the whole table | segments | 6.9 s, 652 MB/s | 5.1 s, 884 MB/s | 1.36 |
-| one transfer, the segments compress the rows (`server.compress`) | segments | 6.9 s, 652 MB/s | 4.9 s, 923 MB/s | 1.42 |
-| a transfer per group of leaf partitions (`read.split=partitions`) | 12 parts | 9.1 s, 494 MB/s | 6.4 s, 707 MB/s | 1.43 |
-| the same, compressed | 12 parts | 8.8 s, 510 MB/s | 6.2 s, 725 MB/s | 1.42 |
-| a transfer per segment (`read.split=segments`) | segments | 6.8 s, 664 MB/s | 4.9 s, 915 MB/s | 1.38 |
-| **Import: Spark reads that Parquet from HDFS and writes it into a Cloudberry table** | | | | |
-| the rows shuffled into the write tasks, one INSERT (the default) | segments | 23.2 s, 195 MB/s | 17.5 s, 258 MB/s | 1.33 |
-| no shuffle: a write task per Parquet split (`write.repartition=false`) | splits | 18.9 s, 239 MB/s | 13.9 s, 324 MB/s | 1.35 |
-| an INSERT per task into its staging table, the commit moves them (`write.staging`) | segments | 40.6 s, 111 MB/s | 34.9 s, 129 MB/s | 1.16 |
-| **Copy: Spark reads `its_stress` from Cloudberry and writes it into another Cloudberry table** | | | | |
-| one transfer each way, one INSERT | segments | 26.1 s, 173 MB/s | 25.7 s, 176 MB/s | 1.02 |
-| through staging tables (`write.staging`) | segments | 37.9 s, 119 MB/s | 31.2 s, 145 MB/s | 1.21 |
-| **A failure: an executor killed (`kill -9`) 2 s into an export** | | | | |
-| a transfer per group of leaf partitions: the parts of its tasks run again | 12 parts | 14.9 s, exact | 11.0 s, exact | 1.35 |
-| one transfer of the whole table | segments | fails ² | fails | |
+**Export** — Spark reads `its_stress` from Cloudberry and writes it into HDFS as Parquet:
 
-1. The Spark tasks on the Cloudberry side: "segments" — a task per primary segment (min(segments, task slots),
-   equal here); "12 parts" — the leaf partitions, as many at once as the task slots; "splits" — a task per Parquet
-   split, an INSERT per as many of them as segments, in one transaction.
-2. "partition ... of run ... restarted": one transfer cannot be started again by a task.
+| Read mode | `default`, MB/s | `large`, MB/s | Gain |
+|---|---|---|---|
+| one transfer | 652 | 884 | ×1.36 |
+| one transfer, compressed by the segments (`server.compress`) | 652 | 923 | ×1.42 |
+| a transfer per segment (`read.split=segments`) | 664 | 915 | ×1.38 |
+| a transfer per group of leaf partitions (`read.split=partitions`) | 494 | 707 | ×1.43 |
+| the same, compressed | 510 | 725 | ×1.42 |
+
+**Import** — Spark reads that Parquet from HDFS and writes it into a Cloudberry table:
+
+| Write mode | `default`, MB/s | `large`, MB/s | Gain |
+|---|---|---|---|
+| the rows shuffled into the write tasks, one INSERT (the default) | 195 | 258 | ×1.33 |
+| no shuffle: a write task per Parquet split (`write.repartition=false`) | 239 | 324 | ×1.35 |
+| an INSERT per task into its staging table (`write.staging`) | 111 | 129 | ×1.16 |
+
+**Copy** — Spark reads `its_stress` from Cloudberry and writes it into another Cloudberry table:
+
+| Write mode | `default`, MB/s | `large`, MB/s | Gain |
+|---|---|---|---|
+| one INSERT | 173 | 176 | ×1.02 |
+| through staging tables (`write.staging`) | 119 | 145 | ×1.21 |
+
+**A failure** — an executor killed (`kill -9`) 2 s into an export: with `read.split=partitions` the parts of its
+tasks run again and the Parquet is exact; one transfer fails ("partition ... of run ... restarted").
 
 **What it shows**:
 
-- **A transfer runs a task per segment**, so the segments set its parallelism: 8 segments with 8 task slots make
-  an export 1.4 times faster than 4 with 4. Every task and every segment is one single-threaded pipeline (a
+- **A transfer runs a task per segment**, so the segments set its parallelism: with a task slot per segment, 8
+  segments export 1.4 times faster than 4. Every task and every segment is one single-threaded pipeline (a
   segment scans and formats its rows, a task parses them and writes Parquet): more of them — more speed, while
   the CPU of the machine lasts.
 - **A split by leaf partitions** runs its 12 parts on the task slots, every part a transfer of all the segments:
   with a slot per segment the plain transfer is faster — the split wins only while the segments are fewer than
-  the task slots. Its point is a failure: a killed executor costs a rerun of its parts, the result is exact —
-  one transfer fails.
+  the task slots. Its point is a failure: a killed executor costs a rerun of its parts, not the whole read.
 - **Writes scale with the segments too**: the INSERT runs on every segment at once (a process parsing the
-  external table and one inserting after the redistribution by the distribution key) — an import without the
-  shuffle 239 -> 324 MB/s. The write tasks wait for the INSERT most of their time: formatting the rows is a small
-  part of a write task (a profile — jstack of the tasks every 0.1 s).
+  external table and one inserting after the redistribution by the distribution key). The write tasks wait for
+  the INSERT most of their time: formatting the rows is a small part of a write task (a profile — jstack of the
+  tasks every 0.1 s).
 - **Not explained, not profiled**: a staging import does not grow with the segments (its commit copies the rows
-  once more inside Cloudberry), a copy gains nothing from 4 to 8 segments (173 -> 176 MB/s).
+  once more inside Cloudberry), a copy gains nothing from 4 to 8 segments.
 - **Compression** does not matter here: the network of the stand is not the limit.
 - **The noise**: one run of every scenario; the same scenario differs by up to ~10% between runs, a few percent
   for an export.
