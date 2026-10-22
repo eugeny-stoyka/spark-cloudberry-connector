@@ -1,0 +1,6 @@
+# the build context needs the distributions, configs and scripts only
+.downloads/*.ok
+.downloads/*.log
+docker-compose.yml
+README.md
+run.sh

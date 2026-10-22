@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- test stand: YARN of one ResourceManager and one NodeManager -->
+<configuration>
+  <property>
+    <name>yarn.resourcemanager.hostname</name>
+    <value>resourcemanager</value>
+  </property>
+  <property>
+    <name>yarn.resourcemanager.bind-host</name>
+    <value>0.0.0.0</value>
+  </property>
+  <property>
+    <name>yarn.nodemanager.bind-host</name>
+    <value>0.0.0.0</value>
+  </property>
+
+  <!-- resources of the NodeManager and the container limit — docker/.env (YARN_NM_MEMORY_MB,
+       YARN_NM_VCORES, YARN_CONTAINER_MAX_MB), the entrypoint puts them in place of the @...@ marks -->
+  <property>
+    <name>yarn.nodemanager.resource.memory-mb</name>
+    <value>@YARN_NM_MEMORY_MB@</value>
+  </property>
+  <property>
+    <name>yarn.nodemanager.resource.cpu-vcores</name>
+    <value>@YARN_NM_VCORES@</value>
+  </property>
+  <property>
+    <name>yarn.scheduler.minimum-allocation-mb</name>
+    <value>256</value>
+  </property>
+  <property>
+    <name>yarn.scheduler.maximum-allocation-mb</name>
+    <value>@YARN_CONTAINER_MAX_MB@</value>
+  </property>
+  <property>
+    <name>yarn.scheduler.maximum-allocation-vcores</name>
+    <value>@YARN_NM_VCORES@</value>
+  </property>
+  <!-- memory checks get in the way of JVMs in containers (the virtual memory of Java 11 is large) -->
+  <property>
+    <name>yarn.nodemanager.vmem-check-enabled</name>
+    <value>false</value>
+  </property>
+  <property>
+    <name>yarn.nodemanager.pmem-check-enabled</name>
+    <value>false</value>
+  </property>
+
+  <!-- container logs are collected into HDFS: yarn logs -applicationId <id> -->
+  <property>
+    <name>yarn.log-aggregation-enable</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>yarn.nodemanager.remote-app-log-dir</name>
+    <value>/tmp/logs</value>
+  </property>
+  <property>
+    <name>yarn.nodemanager.delete.debug-delay-sec</name>
+    <value>600</value>
+  </property>
+</configuration>

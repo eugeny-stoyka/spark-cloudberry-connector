@@ -1,0 +1,7 @@
+# Scripts run by bash (the regression suite on the docker stand, examples/run-test-app.sh) and the
+# probes fed to spark-shell in Linux containers: always LF, otherwise with core.autocrlf=true bash
+# fails on '\r'
+*.sh                    text eol=lf
+src/test/regression/**  text eol=lf
+# the stand: configs and scripts are copied into Linux images
+docker/**               text eol=lf

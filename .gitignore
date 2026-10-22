@@ -1,0 +1,14 @@
+/target
+/docker/.downloads/
+/.idea
+*.iml
+/.metals
+/.bloop
+.settings
+.project
+.classpath
+*.code-workspace
+*.txt
+*.log
+# local notes, not in the repository
+/tasks.md
