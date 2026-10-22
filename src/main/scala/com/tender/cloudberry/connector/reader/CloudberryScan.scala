@@ -7,7 +7,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.connector.read.partitioning.{Partitioning, UnknownPartitioning}
 import org.apache.spark.sql.connector.read.streaming.{MicroBatchStream, Offset}
 import org.apache.spark.sql.connector.read.{Batch, InputPartition, Scan, Statistics, SupportsReportPartitioning, SupportsReportStatistics}
-import org.apache.spark.sql.tender.cloudberry.connector.{CBColumnMeta, CBOptionsFactory, CBTarget, CbTableTypes, SparkSchemaUtil}
+import org.apache.spark.sql.tender.cloudberry.connector.{CBColumnMeta, CBOptionsFactory, CBTarget, CbTableTypes, DirectSource, DirectTransferSource, SparkSchemaUtil}
 import org.apache.spark.sql.types.StructType
 
 import org.apache.spark.sql.types.{BooleanType, ByteType, DateType, IntegerType, LongType, ShortType, TimestampNTZType, TimestampType}
@@ -43,6 +43,7 @@ class CloudberryScan(optionsFactory: CBOptionsFactory,
   extends Scan
     with SupportsReportPartitioning
     with SupportsReportStatistics
+    with DirectTransferSource
     with Logging
 {
   private var connectorMode: CBConnectorMode = CBConnectorModes.Batch
@@ -108,6 +109,18 @@ class CloudberryScan(optionsFactory: CBOptionsFactory,
   TransferCoordinator.register(session)
 
   override def readSchema(): StructType = schema
+
+  /**
+   * tender: write.direct — this read as the source of a transfer without the Spark tasks: its columns and pushed
+   * filters as one SELECT (the one of a transfer of a batch read); Left — why it cannot be one
+   */
+  override def directSource: Either[String, DirectSource] =
+    if (optionsFactory.sqlTransfer.nonEmpty) Left("the read has its own sqltransfer")
+    else if (schema.isEmpty) Left("the read has no columns")
+    else Right(DirectSource(optionsFactory, () => rowSet.getCbClient.getConnection(), schema,
+      s"select $colListSelect from ${if (dbTableName.nonEmpty) dbTableName else s"($tableOrQuery) sqr"}" +
+        (if (whereClause.nonEmpty) s" where $whereClause" else ""),
+      () => stop()))
 
   private val toBatchCallNo: AtomicLong = new AtomicLong(0)
 

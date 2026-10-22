@@ -10,7 +10,7 @@ import org.apache.spark.sql.connector.write.streaming.StreamingWrite
 import org.apache.spark.sql.connector.write.{BatchWrite, RequiresDistributionAndOrdering, SupportsOverwriteV2, SupportsTruncate, Write, WriteBuilder}
 import org.apache.spark.sql.connector.distributions.{Distribution, Distributions}
 import org.apache.spark.sql.connector.expressions.{Expression, SortOrder}
-import org.apache.spark.sql.tender.cloudberry.connector.{CBColumnMeta, CBOptionsFactory, CBTarget, CbTableTypes, SparkSchemaUtil}
+import org.apache.spark.sql.tender.cloudberry.connector.{CBColumnMeta, CBOptionsFactory, CBTarget, CbTableTypes, DirectTarget, DirectTransferTarget, SparkSchemaUtil}
 
 import java.util.concurrent.atomic.AtomicBoolean
 import org.apache.spark.sql.types.StructType
@@ -144,8 +144,11 @@ class CloudberryWriteBuilder(
       cbTableMeta, targetTableCanonicalName, cbClient, connectorMode, ignoreInsert, truncateAtCommit)
   }
 
-  private def write: Write = new Write with RequiresDistributionAndOrdering {
+  private def write: Write = new Write with RequiresDistributionAndOrdering with DirectTransferTarget {
     override def toBatch: BatchWrite = newBatch()
+    // tender: write.direct — the target as build() has prepared it
+    override def directTarget: DirectTarget = DirectTarget(optionsFactory, () => cbClient.getConnection(), schema,
+      cbTableMeta, targetTableCanonicalName, ignoreInsert, truncateAtCommit)
     override def toStreaming: StreamingWrite = {
       // tender: a stream writes without staging: the checks build() left to the batch write
       if (stagingAsked) {

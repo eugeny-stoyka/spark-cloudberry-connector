@@ -4,6 +4,8 @@ import org.apache.spark.sql.connector.catalog.{Table, TableProvider}
 import org.apache.spark.sql.connector.expressions.Transform
 import org.apache.spark.sql.sources.DataSourceRegister
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.tender.cloudberry.connector.DirectTransfer
 import java.util
 import org.apache.spark.sql.types.StructType
 
@@ -32,6 +34,8 @@ class CloudberryDataSource extends TableProvider
   }
 
   override def getTable(schema: StructType, partitioning: Array[Transform], properties: util.Map[String, String]): Table = {
+    // tender: the planner strategy of write.direct, once per session (the driver: getTable runs only there)
+    SparkSession.getActiveSession.foreach(DirectTransfer.install)
     new CloudberryRowSet(schema, partitioning, properties)
   }
 }

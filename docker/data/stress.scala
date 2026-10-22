@@ -2,7 +2,8 @@
 //   export  Spark reads its_stress from Cloudberry and writes it into HDFS as Parquet (STRESS_HDFS_PATH), in every
 //           read mode of the connector
 //   import  Spark reads that Parquet from HDFS and writes it into its_stress_copy in Cloudberry (overwrite)
-//   copy    Spark reads its_stress from Cloudberry and writes it into its_stress_copy (overwrite)
+//   copy    Spark reads its_stress from Cloudberry and writes it into its_stress_copy (overwrite): through the Spark
+//           tasks, and with write.direct — without them (one INSERT ... SELECT; gpfdist relays for another user)
 // The time is of the transfer only; the sink is checked after it, untimed (its rows, the sums for the Parquet). A
 // line per step: RESULT <step> <seconds> s <the check> <MB/s by the text size of the table>, also in $RESULTS_FILE.
 //   docker/run.sh stress run           (YARN, the executors of STAND_RESOURCES)
@@ -65,6 +66,22 @@ timed("import, write.repartition=false")(write(spark.read.parquet(parquet), Map(
 timed("import, write.staging")(write(spark.read.parquet(parquet), Map("write.staging" -> "true")))(copyRows)
 timed("copy, classic")(write(cb("its_stress")))(copyRows)
 timed("copy, write.staging")(write(cb("its_stress"), Map("write.staging" -> "true")))(copyRows)
+// a copy without the Spark tasks (write.direct): one INSERT ... SELECT in one session; between two sessions —
+// here another user of the cluster under its own password — gpfdist relays on the driver
+val direct = Map("write.direct" -> "true")
+timed("copy, write.direct: INSERT ... SELECT")(write(cb("its_stress"), direct))(copyRows)
+if (steps.isEmpty || steps.exists("copy, write.direct: gpfdist relays".contains)) {
+  val admin = DriverManager.getConnection(opts("url"), opts("user"), opts("password"))
+  def exec(sql: String): Unit = { val st = admin.createStatement(); try st.execute(sql) finally st.close() }
+  exec("drop role if exists its_stress_reader"); exec("create role its_stress_reader login password 'reader'")
+  exec("alter role its_stress_reader with createexttable (type = 'writable', protocol = 'gpfdist')")
+  exec("grant usage on schema test to its_stress_reader"); exec("grant select on test.its_stress to its_stress_reader")
+  val reader = opts ++ Map("user" -> "its_stress_reader", "password" -> "reader")
+  timed("copy, write.direct: gpfdist relays")(write(spark.read.format("cloudberry").options(reader + ("dbtable" -> "its_stress")).load(),
+    direct))(copyRows)
+  exec("drop owned by its_stress_reader"); exec("drop role its_stress_reader")
+  admin.close()
+}
 if (!sys.env.get("STRESS_KEEP_PARQUET").contains("1"))
   fs.delete(new Path(parquet), true)
 report("DONE")

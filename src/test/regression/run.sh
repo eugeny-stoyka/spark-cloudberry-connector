@@ -39,6 +39,7 @@ RUNS=(
   "names-local1|names|--master local[1]|"
   "parser-local1|parser|--master local[1]|"
   "writer-local1|writer|--master local[1]|"
+  "direct-local2|direct|--master local[2]|ALLOW_LOG=division by zero|canceling statement"
   "write-local2|write|--master local[2]|PROBE_PARTITIONS=2"
   "write-local4|write|--master local[4]|PROBE_PARTITIONS=4"
   "nested-local2|nested|--master local[2]|"

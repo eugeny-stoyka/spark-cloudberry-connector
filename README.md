@@ -10,6 +10,8 @@ A Spark 3.5 data source for Apache Cloudberry (DataSource V2): batch reads and w
 - **Fast text.** Read tasks parse the rows straight from the bytes the segments send, write tasks format them
   straight into bytes.
 - **Cloudberry storage.** A write can create PAX and append-optimized tables, distributed and partitioned.
+- **Copies without Spark.** A DataFrame that only reads Cloudberry is written into Cloudberry without the Spark
+  tasks (`write.direct`): one `INSERT ... SELECT`, or between two clusters — through gpfdist relays on the driver.
 
 Inspired by the open-source Spark connector of **ITSumma** — the connector is reworked here throughout. License:
 MIT ([LICENSE](LICENSE)). Packages `com.tender.cloudberry.connector` /
@@ -30,7 +32,8 @@ MIT ([LICENSE](LICENSE)). Packages `com.tender.cloudberry.connector` /
 | JDBC driver | PostgreSQL 42.7.4, not in the jar |
 
 - **Network**: every Cloudberry segment -> every executor host, on the gpfdist ports of the tasks
-  (`server.port`); executors -> the driver, on one port (`coordinator.port`).
+  (`server.port`); executors -> the driver, on one port (`coordinator.port`). `write.direct` between two
+  clusters: the segments of both -> the driver, on its gpfdist ports (`server.port` of the write).
 - **Privileges**: creating gpfdist external tables (readable for a write, writable for a read); `CREATE` in the
   schema of the tables a write creates.
 
@@ -142,6 +145,28 @@ spark.read.format("cloudberry").options(cb).option("dbtable", "logs")
   .option("server.compress", "true").load()
 ```
 
+### A copy without the Spark tasks
+
+```scala
+// a DataFrame that only reads Cloudberry (columns, renames, filters Cloudberry runs): the rows do not go through
+// Spark; the same credentials — one INSERT ... SELECT inside Cloudberry
+val large = spark.read.format("cloudberry").options(cb).option("dbtable", "payments").load()
+  .where("amount > 100").select("id", "amount")
+large.write.format("cloudberry").options(cb).option("dbtable", "large_payments")
+  .option("write.direct", "true").mode("overwrite").save()
+
+// another cluster or other credentials: the segments of the source send the rows through gpfdist relays on the
+// driver to the segments of the target; each side connects under its own url / user / password
+val other = Map("url" -> "jdbc:postgresql://cb2-coordinator:5432/database", "user" -> "loader", "password" -> "...")
+spark.read.format("cloudberry").options(cb).option("dbtable", "payments").load()
+  .write.format("cloudberry").options(other).option("dbtable", "payments")
+  .option("write.direct", "true").mode("append").save()
+```
+
+Anything Spark has to compute (a function of a column, a join, a cache) is written through the Spark tasks as
+without the option. The driver log (INFO) says which way a write went: "write.direct into ..." or "write.direct is
+not applied to ...: <why>".
+
 ### JSON as maps and structs
 
 ```scala
@@ -227,6 +252,25 @@ The transfer is the TEXT format of the external tables; the tasks work on its by
 - **Anything else** — arrays, JSON, doubles on a write, unusual values (infinity, BC dates, decimals to round)
   — goes through its text, field by field. The regression checks both directions against the text of the
   fields value by value and byte by byte (`parser-local1`, `writer-local1`).
+
+### Copies without Spark (`write.direct`)
+
+Spark stays the interface: the connector adds a strategy to the Spark planner of the session (in front of the
+built-in ones). For a write it looks at the plan of the DataFrame: when that is a read of Cloudberry — its
+columns, renamed or not, and the filters Spark pushed into the read — the write becomes `CloudberryDirectTransfer`
+on the driver, without Spark tasks:
+
+- **One session** (the same `url`, `user`, `password`, `dbschema`): one `INSERT INTO target SELECT ... FROM
+  source` inside Cloudberry.
+- **Two sessions** (another cluster, other credentials): gpfdist relays on the driver. The segments of the source
+  push the rows into a writable external table with their locations, the segments of the target read them from a
+  readable one; both INSERTs run at once, the rows pass as they are, without parsing. Each side connects under
+  its own credentials — they never meet; a failure of one side cancels the other, the row counts of both are
+  compared, the target is one transaction.
+
+The values are the ones of the transfer through Spark (the same external tables and their text, the regression
+compares both, `direct-local2`). Anything else — a column computed in Spark, a join, a filter Spark keeps, a
+cache, `sqltransfer` — goes through the Spark tasks, with an INFO line why.
 
 ### The rest
 
@@ -315,6 +359,7 @@ what came compressed: "zstd frames, MB received for MB of rows".
 | `partitionclause` | — | appended to `CREATE TABLE` ⁵ |
 | `tempexttables` | `true` | temporary external tables |
 | `undo.side.effects.sql` | — | SQL run on an abort ⁶ |
+| `write.direct` | `false` | a copy without the Spark tasks ⁷ |
 
 1. Required without `sqltransfer`.
 2. SQL or a PL/pgSQL block instead of the `INSERT ... SELECT`; `<ext_table>` — the external table of the
@@ -326,6 +371,7 @@ what came compressed: "zstd frames, MB received for MB of rows".
 5. After `DISTRIBUTED BY`, e.g. the partitioning of the target of a write (the classic syntax with the
    partitions, as in the example above).
 6. A write with `sqltransfer`: undoes its side effects.
+7. When the DataFrame is a plain read of Cloudberry, see [Copies without Spark](#copies-without-spark-writedirect).
 
 ### Parallelism and transfer
 
@@ -442,26 +488,28 @@ Parquet, the rows of the table. The speed is the text size of the table (4.5 GB)
 
 | Read mode | `default`, MB/s | `large`, MB/s | Gain |
 |---|---|---|---|
-| one transfer | 652 | 884 | ×1.36 |
-| one transfer, compressed by the segments (`server.compress`) | 652 | 923 | ×1.42 |
-| a transfer per segment (`read.split=segments`) | 664 | 915 | ×1.38 |
-| a transfer per group of leaf partitions (`read.split=partitions`) | 494 | 707 | ×1.43 |
-| the same, compressed | 510 | 725 | ×1.42 |
+| one transfer | 672 | 958 | ×1.43 |
+| one transfer, compressed by the segments (`server.compress`) | 608 | 938 | ×1.54 |
+| a transfer per segment (`read.split=segments`) | 703 | 1000 | ×1.42 |
+| a transfer per group of leaf partitions (`read.split=partitions`) | 542 | 714 | ×1.32 |
+| the same, compressed | 549 | 776 | ×1.41 |
 
 **Import** — Spark reads that Parquet from HDFS and writes it into a Cloudberry table:
 
 | Write mode | `default`, MB/s | `large`, MB/s | Gain |
 |---|---|---|---|
-| the rows shuffled into the write tasks, one INSERT (the default) | 195 | 258 | ×1.33 |
-| no shuffle: a write task per Parquet split (`write.repartition=false`) | 239 | 324 | ×1.35 |
-| an INSERT per task into its staging table (`write.staging`) | 111 | 129 | ×1.16 |
+| the rows shuffled into the write tasks, one INSERT (the default) | 192 | 262 | ×1.36 |
+| no shuffle: a write task per Parquet split (`write.repartition=false`) | 296 | 324 | ×1.09 |
+| an INSERT per task into its staging table (`write.staging`) | 127 | 125 | ×0.98 |
 
-**Copy** — Spark reads `its_stress` from Cloudberry and writes it into another Cloudberry table:
+**Copy** — `its_stress` written into another Cloudberry table:
 
 | Write mode | `default`, MB/s | `large`, MB/s | Gain |
 |---|---|---|---|
-| one INSERT | 173 | 176 | ×1.02 |
-| through staging tables (`write.staging`) | 119 | 145 | ×1.21 |
+| through the Spark tasks, one INSERT | 175 | 198 | ×1.13 |
+| through the Spark tasks and staging tables (`write.staging`) | 106 | 135 | ×1.28 |
+| without Spark tasks, one `INSERT ... SELECT` inside Cloudberry (`write.direct`) | 326 | 455 | ×1.40 |
+| without Spark tasks, gpfdist relays on the driver (`write.direct`, another user) | 287 | 429 | ×1.50 |
 
 **A failure** — an executor killed (`kill -9`) 2 s into an export: with `read.split=partitions` the parts of its
 tasks run again and the Parquet is exact; one transfer fails ("partition ... of run ... restarted").
@@ -475,12 +523,15 @@ tasks run again and the Parquet is exact; one transfer fails ("partition ... of 
 - **A split by leaf partitions** runs its 12 parts on the task slots, every part a transfer of all the segments:
   with a slot per segment the plain transfer is faster — the split wins only while the segments are fewer than
   the task slots. Its point is a failure: a killed executor costs a rerun of its parts, not the whole read.
-- **Writes scale with the segments too**: the INSERT runs on every segment at once (a process parsing the
-  external table and one inserting after the redistribution by the distribution key). The write tasks wait for
-  the INSERT most of their time: formatting the rows is a small part of a write task (a profile — jstack of the
-  tasks every 0.1 s).
-- **Not explained, not profiled**: a staging import does not grow with the segments (its commit copies the rows
-  once more inside Cloudberry), a copy gains nothing from 4 to 8 segments.
+- **A write waits for the INSERT**: it runs on every segment at once (a process parsing the external table and
+  one inserting after the redistribution by the distribution key); formatting the rows is a small part of a write
+  task (a profile — jstack of the tasks every 0.1 s).
+- **A copy without the Spark tasks is 1.9–2.3 times faster** than through them: no parsing and formatting of the
+  rows in Spark, no shuffle, no stage of the read before the write — the read and the write run at once. The
+  relays here join two sessions of one cluster (another user), so both INSERTs share its segments; between two
+  clusters every side has its own — not measured.
+- **Not explained, not profiled**: a staging write does not grow with the segments (its commit copies the rows
+  once more inside Cloudberry), an import without the shuffle grows little.
 - **Compression** does not matter here: the network of the stand is not the limit.
 - **The noise**: one run of every scenario; the same scenario differs by up to ~10% between runs, a few percent
   for an export.
@@ -495,6 +546,8 @@ tasks run again and the Parquet is exact; one transfer fails ("partition ... of 
 - A classic read or write does not survive a task restarted midway, speculation is refused — use `read.split` /
   `write.staging`.
 - A write is not compressed; read compression on Cloudberry 2.1 — see the defect above.
+- `write.direct` between two sessions passes all the rows through the driver host (its network is the limit);
+  the segments of both clusters must reach it.
 - `partitionclause` takes the classic syntax with the partitions (`partition by range (d) (start ... every
   ...)`): a PostgreSQL `partition by range (d)` alone makes a table without partitions, a write into it fails.
 
@@ -502,7 +555,7 @@ tasks run again and the Parquet is exact; one transfer fails ("partition ... of 
 
 - The test stand — HDFS, YARN, Spark 3.5.8, Cloudberry 2.1 in Docker: [docker/](docker/README.md)
   (`docker/run.sh cluster up`).
-- The regression on it, 19 runs (local and YARN; reads, writes, streams, split reads, staging writes, types,
-  the parser of a read and the writer of a write, compression, failures):
+- The regression on it, 20 runs (local and YARN; reads, writes, streams, split reads, staging writes, direct
+  copies, types, the parser of a read and the writer of a write, compression, failures):
   [src/test/regression](src/test/regression/README.md) (`docker/run.sh regression`).
 - The comments marked `tender:` explain the reworked parts of the code and the reasons behind them.

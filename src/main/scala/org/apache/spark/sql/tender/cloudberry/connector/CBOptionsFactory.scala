@@ -149,6 +149,13 @@ case class CBOptionsFactory(params: Map[String, String])
    */
   val writeStaging: Boolean = options.getOrElse("write.staging", "false").trim.toBoolean
 
+  /**
+   * tender: write.direct=true — a write of a DataFrame that is a plain read of Cloudberry goes between the clusters
+   * without the Spark tasks (DirectTransfer): one INSERT ... SELECT in one session, gpfdist relays on the driver
+   * between two; any other DataFrame — through the Spark tasks
+   */
+  val writeDirect: Boolean = options.getOrElse("write.direct", "false").trim.toBoolean
+
   private def intOption(name: String, default: Int, min: Int): Int = {
     val value = options.getOrElse(name, default.toString).trim
     val n = scala.util.Try(value.toInt).getOrElse(min - 1)
@@ -222,6 +229,7 @@ case class CBOptionsFactory(params: Map[String, String])
       "read.split.snapshot" -> "", // tender
       "write.repartition" -> "", // tender
       "write.staging" -> "", // tender
+      "write.direct" -> "", // tender
       "coordinator.port" -> "", // tender
       "transfer.settleMs" -> "" // tender
     )
